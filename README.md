@@ -7,7 +7,7 @@ Python code to be ran on Raspberry Pi with a 128x32 small oled display connected
 * Reboot (issues `sudo reboot now` using 5 seconds press when in the correct menu-state (no worries, a progressbar will tell you when to let go)
 * Shutdown (issues `sudo shutdown now` using 10 seconds press when in the correct menu-state (no worries, a progressbar will tell you when to let go)
 * Ability to use your own font on the screen (ttf)
-* Sleep timeout of 15 seconds (oled screen will poweroff after this time
+* ~~Sleep timeout of 15 seconds (oled screen will poweroff after this time~~
 * All timeouts listed above are configurable at top of script
 * Set `VERBOSE = True` if you want more verbose output on the commandline
 
