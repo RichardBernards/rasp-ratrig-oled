@@ -33,6 +33,7 @@
 # Use 'i2cdetect -y 1' to check for disp at 3xC
 
 import time
+import math
 import subprocess
 from board import SCL, SDA
 import busio
@@ -57,15 +58,33 @@ font = ImageFont.load_default()
 VERBOSE = False
 
 
+
 # Setup
+menu_state = -1
+button_click_time = 0
+click_smoothing_time = 0.1
+progressbar_completed = False
+# Callback for button pressed event (needs to be in front of callback declaration)
+def button_pressed(channel):
+	global button_click_time, inactivity_time, sleeping
+	if GPIO.input(PULSE_BTN):
+		pressed_duration = time.time() - button_click_time - click_smoothing_time
+		button_click_time = 0
+		if VERBOSE: print("Button released                 | dT: " + str(pressed_duration) + "s")
+	else:
+		time.sleep(click_smoothing_time)
+		if GPIO.input(PULSE_BTN) == False:
+			if VERBOSE: print("Button pressed                  |")
+			button_click_time = time.time()
+			menu_change_state()
+
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(PULSE_BTN, GPIO.IN)
-
-i2c = busio.I2C(SCL, SDA)
-oled = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c)
-
+GPIO.add_event_detect(PULSE_BTN, GPIO.BOTH, callback=button_pressed)
 
 # Configure OLED display
+i2c = busio.I2C(SCL, SDA)
+oled = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c)
 oled.rotation = 2
 oled.fill(0)
 oled.show()
@@ -77,6 +96,63 @@ image = Image.new("1", (width, height))
 
 draw = ImageDraw.Draw(image)
 draw.rectangle((0, 0, width, height), outline=0, fill=0)
+
+
+# Change the menu state and handle rotation of menu
+def menu_change_state():
+	global menu_state
+	menu_state += 1
+	if menu_state > 3: menu_state = 0
+	if VERBOSE: print("Menu state changed              | State: " + str(menu_state))
+	show_current_screen()
+
+
+# Show current screen on OLED following current menu state
+def show_current_screen():
+	global progressbar_completed
+	if menu_state == -1:
+		## startup state
+		disp_show_network_info()
+	elif menu_state == 0:
+		# check for shutdown progress bar
+		show_progress_bar(SHUTDOWN_TIMEOUT)
+		if progressbar_completed:
+			progressbar_completed = False
+			if VERBOSE: print("Shutting down now               |")
+			subprocess.Popen("sudo shutdown now", shell = True)
+			endprogram()
+		disp_show_network_info()
+	elif menu_state == 1:
+		disp_show_usage_info()
+	elif menu_state == 2:
+		disp_show_line_nice("REBOOT")
+		print("reboot")
+	elif menu_state == 3:
+		# check for reboot progress bar
+		show_progress_bar(REBOOT_TIMEOUT)
+		if progressbar_completed:
+			progressbar_completed = False
+			if VERBOSE: print("Rebooting now                   |")
+			subprocess.Popen("sudo reboot now", shell = True)
+			endprogram()
+		disp_show_line_nice("SHUTDOWN")
+		print("shutdown")
+	else:
+		if VERBOSE: print("No view for current menu state  | State: " + str(menu_state))
+
+
+# Show a progressbar in 20% intervals
+def show_progress_bar(total):
+	global progressbar_completed
+	while True:
+		pressed_duration = time.time() - button_click_time - click_smoothing_time
+		if button_click_time == 0 or GPIO.input(PULSE_BTN):
+			progressbar_completed = True  if pressed_duration >= total else False
+			break
+		else:
+			if math.floor(pressed_duration) % math.floor(total / 5) == 0:
+				disp_show_progressbar(math.floor(pressed_duration) / total)
+
 
 # Pretty print byte sizes into a string
 def get_size(bytes, suffix="B"):
@@ -105,7 +181,7 @@ def disp_show_progressbar(progress):
 	draw.rectangle((0, 0, width, height), outline=0, fill=0) # clear screen
 	draw.rectangle((padding, padding, width - padding - padding, height - padding - padding), outline=255, fill=0)
 	progress_width = round(((width * min([1, progress])) - (padding*6))*1000) / 1000
-	if VERBOSE: print("progress: " + str(progress) + " width: "+ str(progress_width))
+	if VERBOSE: print("Progressbar                     | p: " + str(progress) + ", w: " + str(progress_width))
 	draw.rectangle((padding*3, padding*3, progress_width, height - (padding*6)), outline=255, fill=255)
 	oled.image(image)
 	oled.show()
@@ -145,85 +221,13 @@ def disp_show_usage_info():
 	oled.show()
 
 
-# main loop handling button presses and cycling through menu and power cycle options
+# Main loop to keep program running
 def loop():
-	if VERBOSE: print("Starting loop...                |")
-	menu_state = 0
-	press_threshold = 0.2
-	disp_show_network_info()
-	oled_sleep_timer = OLED_SLEEP_TIMEOUT
-	change_screen = False
-	reboot_state = False
-	shutdown_state = False
-	total_progress = 0
 	while True:
-		# check for input from pulse button
-		press_duration = 0
-		if GPIO.input(PULSE_BTN) == False:
-			if VERBOSE: print("Push button pressed...          |")
-			if menu_state == -1: oled.poweron()
-			oled_sleep_timer = OLED_SLEEP_TIMEOUT
-			while GPIO.input(PULSE_BTN) == False:
-				time.sleep(0.1)
-				press_duration += 0.1
-				if (reboot_state or shutdown_state) and press_duration > press_threshold:
-					if VERBOSE: print("Updating progress bar           |")
-					total_progress = REBOOT_TIMEOUT if reboot_state else SHUTDOWN_TIMEOUT
-					disp_show_progressbar(press_duration / total_progress)
-			if menu_state > 1 and press_duration > press_threshold:
-				if VERBOSE: print("Longpress detected              | for " + str(press_duration) + "s")
-				if (press_duration / total_progress) < 1:
-					change_screen = True
-				if reboot_state and press_duration >= REBOOT_TIMEOUT:
-					if VERBOSE: print("Reboot initiated                |")
-					disp_show_line_nice("Rebooting...")
-					subprocess.Popen("sudo reboot now", shell = True)
-					break
-				if shutdown_state and press_duration >= SHUTDOWN_TIMEOUT:
-					if VERBOSE: print("Shutdown initiated              |")
-					disp_show_line_nice("Shutting down...")
-					subprocess.Popen("sudo shutdown now", shell = True)
-					break
-			else:
-				menu_state += 1
-				change_screen = True
-		else:
-			time.sleep(0.1)
-			oled_sleep_timer -= 0.1
-
-			# check if it's time to put the oled to sleep...
-			if oled_sleep_timer <= 0:
-				if VERBOSE: print("Putting oled to sleep...        |")
-				draw.rectangle((0, 0, width, height), outline=0, fill=0)
-				oled.image(image)
-				oled.show()
-				menu_state = -1
-				oled.poweroff()
-			continue
-
-		if oled_sleep_timer > 0 and change_screen:
-			# Handle different menu states
-			if menu_state > 3:
-				menu_state = 0
-			# --0-- Show hostname nicely
-			if menu_state == 0:
-				shutdown_state = False
-				disp_show_network_info()
-			# --1-- Show usage information
-			elif menu_state == 1:
-				disp_show_usage_info()
-			# --2-- Reboot screen
-			elif menu_state == 2:
-				reboot_state = True
-				disp_show_line_nice("REBOOT")
-			# --3-- Shutdown screen
-			elif menu_state == 3:
-				reboot_state = False
-				shutdown_state = True
-				disp_show_line_nice("SHUTDOWN")
-			change_screen = False
+		something = 1
 
 
+# Cleanup
 def endprogram():
 	if VERBOSE: print("Ending program and cleaning up |")
 	oled.poweroff()
@@ -232,6 +236,7 @@ def endprogram():
 
 if __name__ == '__main__':
 	try:
+		show_current_screen()
 		loop()
 
 	except KeyboardInterrupt:
